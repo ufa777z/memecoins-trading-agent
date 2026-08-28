@@ -1,32 +1,34 @@
+import TelegramBot from 'node-telegram-bot-api';
 import type { ConvergenceSignal } from '../agents/signalDetector.js';
 import type { TokenScore } from '../agents/tokenAnalyzer.js';
 import type { Position } from '../agents/positionManager.js';
 import type { CTSignal } from '../agents/ctScanner.js';
 
 /**
- * Console-first alerts. Telegram is optional — only if both env vars are set.
+ * Console always. Telegram if TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID are set.
  */
 export class Notifier {
-  private bot: any = null;
+  private bot: TelegramBot | null = null;
   private chatId: string;
 
   constructor() {
-    this.chatId = process.env.TELEGRAM_CHAT_ID || '';
-    const token = process.env.TELEGRAM_BOT_TOKEN;
+    this.chatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
+    const token = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 
     if (token && this.chatId) {
       try {
-        // Dynamic import-style require avoided; load only if configured
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const TelegramBot = require('node-telegram-bot-api');
         this.bot = new TelegramBot(token, { polling: true });
-        console.log('[Notifier] Telegram optional channel enabled');
+        console.log('[Notifier] Telegram enabled — signals will also go to your chat');
       } catch (err) {
-        console.warn('[Notifier] Telegram package/init failed — console only');
+        console.error('[Notifier] Telegram init failed:', (err as Error).message);
         this.bot = null;
       }
     } else {
-      console.log('[Notifier] Console only (no TELEGRAM_* env) — signals print here');
+      console.log(
+        '[Notifier] Console only — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env'
+      );
+      if (!token) console.log('[Notifier]   missing TELEGRAM_BOT_TOKEN');
+      if (!this.chatId) console.log('[Notifier]   missing TELEGRAM_CHAT_ID');
     }
   }
 
@@ -36,46 +38,42 @@ export class Notifier {
     onPositions: () => Promise<string>;
   }): void {
     if (!this.bot) return;
-    this.bot.onText(/\/status/, async (msg: any) => {
+
+    this.bot.onText(/\/status/, async (msg) => {
       if (String(msg.chat.id) !== this.chatId) return;
-      await this.bot.sendMessage(this.chatId, await handlers.onStatus(), {
+      await this.bot!.sendMessage(this.chatId, await handlers.onStatus(), {
         parse_mode: 'Markdown',
         disable_web_page_preview: true,
       });
     });
-    this.bot.onText(/\/report/, async (msg: any) => {
+    this.bot.onText(/\/report/, async (msg) => {
       if (String(msg.chat.id) !== this.chatId) return;
-      await this.bot.sendMessage(this.chatId, await handlers.onReport(), {
+      await this.bot!.sendMessage(this.chatId, await handlers.onReport(), {
         parse_mode: 'Markdown',
         disable_web_page_preview: true,
       });
     });
-    this.bot.onText(/\/positions/, async (msg: any) => {
+    this.bot.onText(/\/positions/, async (msg) => {
       if (String(msg.chat.id) !== this.chatId) return;
-      await this.bot.sendMessage(this.chatId, await handlers.onPositions(), {
+      await this.bot!.sendMessage(this.chatId, await handlers.onPositions(), {
         parse_mode: 'Markdown',
         disable_web_page_preview: true,
       });
     });
   }
 
-  private async send(text: string): Promise<void> {
-    // Always print clean console block
-    console.log('\n' + text + '\n');
-
-    if (this.bot && this.chatId) {
-      try {
-        await this.bot.sendMessage(this.chatId, text, {
-          parse_mode: 'Markdown',
-          disable_web_page_preview: true,
-        });
-      } catch (err) {
-        console.error('[Notifier] Telegram send failed:', (err as Error).message);
-      }
+  private async sendTelegram(text: string): Promise<void> {
+    if (!this.bot || !this.chatId) return;
+    try {
+      await this.bot.sendMessage(this.chatId, text, {
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+      });
+    } catch (err) {
+      console.error('[Notifier] Telegram send failed:', (err as Error).message);
     }
   }
 
-  /** Primary alert — coin only, no auto-buy */
   async notifySignalOnly(
     signal: ConvergenceSignal,
     score: TokenScore,
@@ -90,8 +88,7 @@ export class Notifier {
       .join(', ');
     const windowSec = Math.max(1, Math.round((signal.lastSeen - signal.firstSeen) / 1000));
 
-    // Plain-text friendly for terminal (no Markdown noise)
-    const block = [
+    const consoleBlock = [
       '════════════════════════════════════════',
       `  SIGNAL (manual)  $${sym}`,
       '════════════════════════════════════════',
@@ -105,46 +102,39 @@ export class Notifier {
       `  vol ${score.volume} | hold ${score.holders} | dev ${score.dev} | dist ${score.distribution}`,
       score.volumeUsd != null
         ? `  24h vol ~$${Math.round(score.volumeUsd).toLocaleString()}`
-        : '',
+        : null,
       '',
       `  suggested size: ~${suggestedSol} SOL  (you decide)`,
       '',
-      `  GMGN:       https://gmgn.ai/sol/token/${ca}`,
+      `  GMGN:        https://gmgn.ai/sol/token/${ca}`,
       `  DexScreener: https://dexscreener.com/solana/${ca}`,
-      `  Birdeye:    https://birdeye.so/token/${ca}?chain=solana`,
-      `  Solscan:    https://solscan.io/token/${ca}`,
+      `  Birdeye:     https://birdeye.so/token/${ca}?chain=solana`,
+      `  Solscan:     https://solscan.io/token/${ca}`,
       '',
       '  No auto-buy — copy CA and trade yourself',
       '════════════════════════════════════════',
     ]
-      .filter((line) => line !== '')
+      .filter((line) => line != null)
       .join('\n');
 
-    console.log('\n' + block + '\n');
+    console.log('\n' + consoleBlock + '\n');
 
-    // Optional Telegram (Markdown version)
-    if (this.bot && this.chatId) {
-      try {
-        await this.bot.sendMessage(
-          this.chatId,
-          [
-            `👁 *SIGNAL (manual)* — $${sym}`,
-            '',
-            `CA: \`${ca}\``,
-            '',
-            `wallets: ${signal.walletCount}`,
-            `score: *${finalScore.toFixed(0)}*/100`,
-            `suggested: ~${suggestedSol} SOL`,
-            '',
-            `[GMGN](https://gmgn.ai/sol/token/${ca})`,
-            `[DexScreener](https://dexscreener.com/solana/${ca})`,
-          ].join('\n'),
-          { parse_mode: 'Markdown', disable_web_page_preview: true }
-        );
-      } catch {
-        /* ignore */
-      }
-    }
+    await this.sendTelegram(
+      [
+        `👁 *SIGNAL (manual)* — $${sym}`,
+        '',
+        'CA: `' + ca + '`',
+        '',
+        `wallets: ${signal.walletCount}`,
+        `score: *${finalScore.toFixed(0)}*/100`,
+        `suggested: ~${suggestedSol} SOL`,
+        '',
+        `[GMGN](https://gmgn.ai/sol/token/${ca})`,
+        `[DexScreener](https://dexscreener.com/solana/${ca})`,
+        '',
+        '_No auto-buy — trade yourself_',
+      ].join('\n')
+    );
   }
 
   async notifyEntry(
@@ -154,16 +144,16 @@ export class Notifier {
     _price: number,
     txHash?: string
   ): Promise<void> {
-    await this.send(
-      [
-        `ENTERED $${score.symbol}`,
-        `CA: ${signal.tokenAddress}`,
-        `wallets: ${signal.walletCount} | size: ${sol} SOL`,
-        txHash ? `tx: ${txHash}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n')
-    );
+    const text = [
+      `ENTERED $${score.symbol}`,
+      `CA: ${signal.tokenAddress}`,
+      `wallets: ${signal.walletCount} | size: ${sol} SOL`,
+      txHash ? `tx: ${txHash}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    console.log(text);
+    await this.sendTelegram(text);
   }
 
   async notifyExit(
@@ -172,13 +162,15 @@ export class Notifier {
     _solOut: number,
     message: string
   ): Promise<void> {
-    await this.send(
-      `EXIT $${position.symbol} ${percent}% — ${message}`
-    );
+    const text = `EXIT $${position.symbol} ${percent}% — ${message}`;
+    console.log(text);
+    await this.sendTelegram(text);
   }
 
   async notifyEmergency(position: Position, message: string): Promise<void> {
-    await this.send(`EMERGENCY $${position.symbol}: ${message}`);
+    const text = `EMERGENCY $${position.symbol}: ${message}`;
+    console.log(text);
+    await this.sendTelegram(text);
   }
 
   async notifySkip(token: string, symbol: string, score: TokenScore, reason: string): Promise<void> {
@@ -186,8 +178,8 @@ export class Notifier {
   }
 
   async notifyCTMotion(position: Position, ct: CTSignal): Promise<void> {
-    await this.send(
-      `CT $${position.symbol}: ${ct.trend} score ${ct.motionScore} — ${ct.summary}`
-    );
+    const text = `CT $${position.symbol}: ${ct.trend} score ${ct.motionScore} — ${ct.summary}`;
+    console.log(text);
+    await this.sendTelegram(text);
   }
 }
