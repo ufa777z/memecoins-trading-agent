@@ -12,6 +12,27 @@ export interface WalletBuyEvent {
   source: 'pumpfun' | 'raydium' | 'jupiter' | 'unknown';
 }
 
+function resolveWsUrl(): string {
+  const fromEnv = (process.env.HELIUS_WS_URL || '').trim();
+  if (fromEnv) return fromEnv;
+
+  const key = (process.env.HELIUS_API_KEY || '').trim();
+  if (key) return `wss://mainnet.helius-rpc.com/?api-key=${key}`;
+
+  return (PARAMS.HELIUS_WS_URL || '').trim();
+}
+
+function isWsConfigured(wsUrl: string): boolean {
+  if (!wsUrl.startsWith('wss://') && !wsUrl.startsWith('ws://')) return false;
+  // Reject empty api-key= with nothing after
+  if (/api-key=\s*$/i.test(wsUrl) || /api-key=&/i.test(wsUrl)) return false;
+  const key = (process.env.HELIUS_API_KEY || '').trim();
+  // Key optional if full WS URL already embeds a non-empty api-key=
+  if (key) return true;
+  const m = wsUrl.match(/api-key=([^&\s]+)/i);
+  return !!(m && m[1] && m[1].length > 8);
+}
+
 export class WalletTracker extends EventEmitter {
   private ws: WebSocket | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -19,17 +40,19 @@ export class WalletTracker extends EventEmitter {
   private isRunning = false;
 
   private static DEX_PROGRAMS = new Set([
-    '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', // Raydium AMM v4
-    '5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1', // Raydium CLMM
-    '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', // Pump.fun
-    'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', // Jupiter v6
-    'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc', // Orca
+    '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',
+    '5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1',
+    '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
+    'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',
+    'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',
   ]);
 
   constructor() {
     super();
     if (TRACKED_WALLETS.length === 0) {
-      console.warn('[WalletTracker] No wallets in TRACKED_WALLETS — add addresses in src/config/params.ts');
+      console.warn(
+        '[WalletTracker] No wallets in TRACKED_WALLETS — add addresses in src/config/params.ts'
+      );
     }
   }
 
@@ -51,11 +74,18 @@ export class WalletTracker extends EventEmitter {
   }
 
   private connect(): void {
-    const wsUrl = PARAMS.HELIUS_WS_URL;
-    if (!wsUrl || wsUrl.includes('api-key=' + '') || !process.env.HELIUS_API_KEY) {
-      console.error('[WalletTracker] HELIUS_API_KEY / HELIUS_WS_URL missing');
+    const wsUrl = resolveWsUrl();
+    if (!isWsConfigured(wsUrl)) {
+      console.error(
+        '[WalletTracker] HELIUS_API_KEY / HELIUS_WS_URL missing or invalid.\n' +
+          '  Set in .env:\n' +
+          '  HELIUS_API_KEY=...\n' +
+          '  HELIUS_WS_URL=wss://mainnet.helius-rpc.com/?api-key=...'\n'
+      );
       return;
     }
+
+    console.log('[WalletTracker] Connecting to Helius WebSocket...');
 
     try {
       this.ws = new WebSocket(wsUrl);
@@ -139,8 +169,9 @@ export class WalletTracker extends EventEmitter {
       if (!meta || !transaction || meta.err) return null;
 
       const accountKeys: string[] =
-        transaction.message?.accountKeys?.map((k: any) => (typeof k === 'string' ? k : k.pubkey)) ||
-        [];
+        transaction.message?.accountKeys?.map((k: any) =>
+          typeof k === 'string' ? k : k.pubkey
+        ) || [];
 
       const signerWallet = accountKeys.find((key) => TRACKED_WALLETS.includes(key));
       if (!signerWallet) return null;
@@ -175,8 +206,10 @@ export class WalletTracker extends EventEmitter {
 
       let source: WalletBuyEvent['source'] = 'unknown';
       if (accountKeys.includes('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P')) source = 'pumpfun';
-      else if (accountKeys.includes('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8')) source = 'raydium';
-      else if (accountKeys.includes('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4')) source = 'jupiter';
+      else if (accountKeys.includes('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8'))
+        source = 'raydium';
+      else if (accountKeys.includes('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4'))
+        source = 'jupiter';
 
       return {
         wallet: signerWallet,
