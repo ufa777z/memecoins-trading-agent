@@ -24,10 +24,8 @@ function resolveWsUrl(): string {
 
 function isWsConfigured(wsUrl: string): boolean {
   if (!wsUrl.startsWith('wss://') && !wsUrl.startsWith('ws://')) return false;
-  // Reject empty api-key= with nothing after
   if (/api-key=\s*$/i.test(wsUrl) || /api-key=&/i.test(wsUrl)) return false;
   const key = (process.env.HELIUS_API_KEY || '').trim();
-  // Key optional if full WS URL already embeds a non-empty api-key=
   if (key) return true;
   const m = wsUrl.match(/api-key=([^&\s]+)/i);
   return !!(m && m[1] && m[1].length > 8);
@@ -77,10 +75,7 @@ export class WalletTracker extends EventEmitter {
     const wsUrl = resolveWsUrl();
     if (!isWsConfigured(wsUrl)) {
       console.error(
-        '[WalletTracker] HELIUS_API_KEY / HELIUS_WS_URL missing or invalid.\n' +
-          '  Set in .env:\n' +
-          '  HELIUS_API_KEY=...\n' +
-          '  HELIUS_WS_URL=wss://mainnet.helius-rpc.com/?api-key=...'\n'
+        '[WalletTracker] HELIUS_API_KEY / HELIUS_WS_URL missing or invalid. Set both in .env'
       );
       return;
     }
