@@ -22,11 +22,12 @@ export class Orchestrator {
 
   constructor() {
     this.positionManager = new PositionManager(this.tokenAnalyzer, this.ctScanner);
+    this.positionManager.setTradeExecutor(this.tradeExecutor);
   }
 
   async start(): Promise<void> {
     console.log('\n╔═══════════════════════════════════╗');
-    console.log('║     TRENCH_AGENT v1.1.0           ║');
+    console.log('║     TRENCH_AGENT v1.2.0           ║');
     console.log('╚═══════════════════════════════════╝\n');
 
     this.positionManager.loadFromDB();
@@ -70,12 +71,16 @@ export class Orchestrator {
           result.outputAmount,
           decision.message
         );
-        this.positionManager.recordPartialExit(position.id, decision.percentToSell, result.outputAmount);
+        this.positionManager.recordPartialExit(
+          position.id,
+          decision.percentToSell,
+          result.outputAmount
+        );
 
         if (position.remainingPercent - decision.percentToSell <= 5) {
-          const pnlSol = result.outputAmount - position.entrySolAmount;
+          const pnlSol = result.outputAmount - position.entrySolAmount * (decision.percentToSell / 100);
           const pnlPct = position.entrySolAmount
-            ? (pnlSol / position.entrySolAmount) * 100
+            ? ((position.currentMultiplier - 1) * 100)
             : 0;
           TradeDB.updateExit(position.id, {
             exit_price: result.price,
@@ -90,6 +95,8 @@ export class Orchestrator {
           if (closed) await this.learningEngine.learn(closed);
           this.positionManager.closePosition(position.id);
         }
+      } else {
+        console.error(`[Orchestrator] Exit failed:`, result.error);
       }
     });
 
@@ -113,7 +120,12 @@ export class Orchestrator {
       }
 
       if (!score.pass) {
-        await this.notifier.notifySkip(tokenAddress, score.symbol, score, score.failReasons[0] || 'failed filters');
+        await this.notifier.notifySkip(
+          tokenAddress,
+          score.symbol,
+          score,
+          score.failReasons[0] || 'failed filters'
+        );
         this.processingTokens.delete(tokenAddress);
         return;
       }
@@ -125,7 +137,6 @@ export class Orchestrator {
         console.log(`  CT: ${ct.motionScore}/100 (${ct.trend}) — ${ct.summary}`);
       }
 
-      // CT is amplifier only (SOUL.md)
       const finalScore = Math.min(
         100,
         score.composite * (1 - PARAMS.CT_SCORE_WEIGHT) + ctScore * PARAMS.CT_SCORE_WEIGHT
@@ -157,10 +168,15 @@ export class Orchestrator {
         return;
       }
 
+      // Prefer on-chain style price from DexScreener for MTM
+      let entryPrice = result.price;
+      const dsPrice = await this.tradeExecutor.getTokenPriceSol(tokenAddress);
+      if (dsPrice > 0) entryPrice = dsPrice;
+
       const tradeId = TradeDB.insert({
         token_address: tokenAddress,
         token_symbol: score.symbol,
-        entry_price: result.price,
+        entry_price: entryPrice,
         entry_sol: positionSol,
         entry_time: Date.now(),
         status: 'open',
@@ -178,7 +194,7 @@ export class Orchestrator {
       const trade = TradeDB.getAll().find((t) => t.id === tradeId);
       if (trade) this.positionManager.addPosition(trade, signal.wallets);
 
-      await this.notifier.notifyEntry(signal, score, positionSol, result.price, result.txHash);
+      await this.notifier.notifyEntry(signal, score, positionSol, entryPrice, result.txHash);
     } finally {
       this.processingTokens.delete(tokenAddress);
     }

@@ -1,8 +1,9 @@
 import { EventEmitter } from 'events';
 import { PARAMS } from '../config/params.js';
 import type { TokenAnalyzer } from './tokenAnalyzer.js';
-import type { CTScanner, CTSignal } from './ctScanner.js';
-import type { Trade } from '../data/db.js';
+import type { CTScanner } from './ctScanner.js';
+import type { TradeExecutor } from './tradeExecutor.js';
+import { TradeDB, type Trade } from '../data/db.js';
 
 export interface Position {
   id: number;
@@ -16,6 +17,7 @@ export interface Position {
   signalWallets: string[];
   ctMotionDetected: boolean;
   openedAt: number;
+  hitTp: Set<number>;
 }
 
 export interface ExitDecision {
@@ -29,6 +31,7 @@ export class PositionManager extends EventEmitter {
   private positions: Map<number, Position> = new Map();
   private monitorTimer: NodeJS.Timeout | null = null;
   private recentWalletSells: Map<string, { wallet: string; ts: number }[]> = new Map();
+  private tradeExecutor: TradeExecutor | null = null;
 
   constructor(
     private tokenAnalyzer: TokenAnalyzer,
@@ -37,23 +40,39 @@ export class PositionManager extends EventEmitter {
     super();
   }
 
+  setTradeExecutor(exec: TradeExecutor): void {
+    this.tradeExecutor = exec;
+  }
+
   loadFromDB(): void {
-    // Hook for resuming open trades from SQLite
+    const open = TradeDB.getAll().filter((t) => t.status === 'open');
+    for (const t of open) {
+      let wallets: string[] = [];
+      try {
+        wallets = JSON.parse(t.signal_wallets || '[]');
+      } catch {
+        /* */
+      }
+      this.addPosition(t, wallets);
+    }
+    if (open.length) console.log(`[PositionManager] Restored ${open.length} open positions`);
   }
 
   addPosition(trade: Trade, wallets: string[]): void {
+    if (this.positions.has(trade.id!)) return;
     const pos: Position = {
       id: trade.id!,
       tokenAddress: trade.token_address,
       symbol: trade.token_symbol,
       entrySolAmount: trade.entry_sol,
-      entryPrice: trade.entry_price,
+      entryPrice: trade.entry_price || 0,
       remainingPercent: 100,
       currentMultiplier: 1,
       highWaterMark: 1,
       signalWallets: wallets,
       ctMotionDetected: false,
       openedAt: trade.entry_time,
+      hitTp: new Set(),
     };
     this.positions.set(pos.id, pos);
   }
@@ -64,7 +83,7 @@ export class PositionManager extends EventEmitter {
 
   startMonitoring(): void {
     if (this.monitorTimer) return;
-    this.monitorTimer = setInterval(() => this.tick(), 20_000);
+    this.monitorTimer = setInterval(() => void this.tick(), 15_000);
   }
 
   stopMonitoring(): void {
@@ -109,10 +128,24 @@ export class PositionManager extends EventEmitter {
 
   private async tick(): Promise<void> {
     for (const pos of this.positions.values()) {
-      // Staged TP based on multiplier — real price feed should update currentMultiplier
+      // Mark-to-market
+      if (this.tradeExecutor) {
+        const px = await this.tradeExecutor.getTokenPriceSol(pos.tokenAddress);
+        if (px > 0 && pos.entryPrice > 0) {
+          pos.currentMultiplier = px / pos.entryPrice;
+          pos.highWaterMark = Math.max(pos.highWaterMark, pos.currentMultiplier);
+        } else if (px > 0 && pos.entryPrice === 0) {
+          // entry price unknown (dry run) — skip mult
+        }
+      }
+
       for (const tp of PARAMS.TAKE_PROFITS) {
-        if (pos.currentMultiplier >= tp.multiple && pos.remainingPercent > 20) {
-          // Fire once per level would need state flags; simplified emit
+        if (
+          pos.currentMultiplier >= tp.multiple &&
+          !pos.hitTp.has(tp.multiple) &&
+          pos.remainingPercent > 15
+        ) {
+          pos.hitTp.add(tp.multiple);
           this.emit('exit', {
             position: pos,
             decision: {
@@ -126,7 +159,7 @@ export class PositionManager extends EventEmitter {
         }
       }
 
-      if (pos.currentMultiplier <= 1 + PARAMS.STOP_LOSS_PERCENT / 100) {
+      if (pos.currentMultiplier > 0 && pos.currentMultiplier <= 1 + PARAMS.STOP_LOSS_PERCENT / 100) {
         this.emit('exit', {
           position: pos,
           decision: {
@@ -138,7 +171,6 @@ export class PositionManager extends EventEmitter {
         });
       }
 
-      // Optional CT refresh on open positions
       if (PARAMS.ENABLE_CT_SCANNER) {
         try {
           const ct = await this.ctScanner.scan(pos.tokenAddress, pos.symbol);
