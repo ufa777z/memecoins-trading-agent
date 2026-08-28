@@ -19,6 +19,7 @@ export class Orchestrator {
   private learningEngine = new LearningEngine();
   private notifier = new Notifier();
   private processingTokens = new Set<string>();
+  private signalCount = 0;
 
   constructor() {
     this.positionManager = new PositionManager(this.tokenAnalyzer, this.ctScanner);
@@ -27,10 +28,12 @@ export class Orchestrator {
 
   async start(): Promise<void> {
     console.log('\n╔═══════════════════════════════════╗');
-    console.log('║     TRENCH_AGENT v1.2.0           ║');
+    console.log('║     TRENCH_AGENT v1.3.0           ║');
     console.log('╚═══════════════════════════════════╝\n');
 
-    this.positionManager.loadFromDB();
+    if (!PARAMS.MANUAL_MODE) {
+      this.positionManager.loadFromDB();
+    }
     this.setupEventHandlers();
 
     this.notifier.setupCommands({
@@ -40,20 +43,27 @@ export class Orchestrator {
     });
 
     this.walletTracker.start();
-    this.positionManager.startMonitoring();
+    if (!PARAMS.MANUAL_MODE) {
+      this.positionManager.startMonitoring();
+    }
 
     console.log(`[Orchestrator] Tracking ${this.walletTracker.getTrackedCount()} wallets`);
+    console.log(`[Orchestrator] Mode: ${PARAMS.MANUAL_MODE ? 'MANUAL (alerts only)' : 'AUTO'}`);
     console.log(`[Orchestrator] Dry run: ${PARAMS.DRY_RUN}`);
     console.log(`[Orchestrator] CT scanner: ${PARAMS.ENABLE_CT_SCANNER}`);
-    console.log('[Orchestrator] Ready — waiting for signals...\n');
+    console.log('[Orchestrator] Ready — waiting for wallet convergence...\n');
   }
 
   private setupEventHandlers(): void {
     this.walletTracker.on('buy', async (event: WalletBuyEvent) => {
-      this.positionManager.onTrackedWalletSell(event);
+      if (!PARAMS.MANUAL_MODE) {
+        this.positionManager.onTrackedWalletSell(event);
+      }
       const signal = this.signalDetector.onBuyEvent(event);
       if (signal) await this.processSignal(signal);
     });
+
+    if (PARAMS.MANUAL_MODE) return;
 
     this.positionManager.on('exit', async ({ position, decision }) => {
       if (!decision.shouldExit) return;
@@ -78,10 +88,9 @@ export class Orchestrator {
         );
 
         if (position.remainingPercent - decision.percentToSell <= 5) {
-          const pnlSol = result.outputAmount - position.entrySolAmount * (decision.percentToSell / 100);
-          const pnlPct = position.entrySolAmount
-            ? ((position.currentMultiplier - 1) * 100)
-            : 0;
+          const pnlSol =
+            result.outputAmount - position.entrySolAmount * (decision.percentToSell / 100);
+          const pnlPct = position.entrySolAmount ? (position.currentMultiplier - 1) * 100 : 0;
           TradeDB.updateExit(position.id, {
             exit_price: result.price,
             exit_sol: result.outputAmount,
@@ -120,12 +129,15 @@ export class Orchestrator {
       }
 
       if (!score.pass) {
-        await this.notifier.notifySkip(
-          tokenAddress,
-          score.symbol,
-          score,
-          score.failReasons[0] || 'failed filters'
-        );
+        console.log(`  SKIP: ${score.failReasons[0] || 'filters'}`);
+        if (PARAMS.NOTIFY_SKIPS) {
+          await this.notifier.notifySkip(
+            tokenAddress,
+            score.symbol,
+            score,
+            score.failReasons[0] || 'failed filters'
+          );
+        }
         this.processingTokens.delete(tokenAddress);
         return;
       }
@@ -143,32 +155,66 @@ export class Orchestrator {
       );
 
       if (finalScore < PARAMS.MIN_COMPOSITE_SCORE) {
-        await this.notifier.notifySkip(
-          tokenAddress,
-          score.symbol,
+        console.log(`  SKIP: final ${finalScore.toFixed(0)} < ${PARAMS.MIN_COMPOSITE_SCORE}`);
+        if (PARAMS.NOTIFY_SKIPS) {
+          await this.notifier.notifySkip(
+            tokenAddress,
+            score.symbol,
+            score,
+            `final ${finalScore.toFixed(0)} < ${PARAMS.MIN_COMPOSITE_SCORE}`
+          );
+        }
+        this.processingTokens.delete(tokenAddress);
+        return;
+      }
+
+      const suggestedSol = this.signalDetector.calculatePositionSize(signal, finalScore);
+      this.signalCount += 1;
+
+      // ── MANUAL MODE: alert only, never trade ───────────────────────────
+      if (PARAMS.MANUAL_MODE) {
+        TradeDB.insert({
+          token_address: tokenAddress,
+          token_symbol: score.symbol,
+          entry_price: 0,
+          entry_sol: 0,
+          entry_time: Date.now(),
+          status: 'signal_only',
+          signal_wallets: JSON.stringify(signal.wallets),
+          wallet_count: signal.walletCount,
+          composite_score: finalScore,
+          score_volume: score.volume,
+          score_holders: score.holders,
+          score_dev: score.dev,
+          score_distribution: score.distribution,
+          score_ct: ctScore,
+          ct_motion: ctScore > 50 ? 1 : 0,
+        });
+
+        await this.notifier.notifySignalOnly(
+          signal,
           score,
-          `final ${finalScore.toFixed(0)} < ${PARAMS.MIN_COMPOSITE_SCORE}`
+          finalScore,
+          suggestedSol,
+          ctScore
         );
-        this.processingTokens.delete(tokenAddress);
+        console.log(`  → MANUAL alert sent for $${score.symbol}`);
         return;
       }
 
-      const positionSol = this.signalDetector.calculatePositionSize(signal, finalScore);
+      // ── AUTO path (only if MANUAL_MODE=false) ───────────────────────────
       const solBalance = await this.tradeExecutor.getSOLBalance();
-      if (!PARAMS.DRY_RUN && solBalance < positionSol + 0.05) {
+      if (!PARAMS.DRY_RUN && solBalance < suggestedSol + 0.05) {
         console.log(`[Orchestrator] Insufficient SOL (${solBalance.toFixed(2)})`);
-        this.processingTokens.delete(tokenAddress);
         return;
       }
 
-      const result = await this.tradeExecutor.buy(tokenAddress, positionSol);
+      const result = await this.tradeExecutor.buy(tokenAddress, suggestedSol);
       if (!result.success) {
         console.error('[Orchestrator] Buy failed:', result.error);
-        this.processingTokens.delete(tokenAddress);
         return;
       }
 
-      // Prefer on-chain style price from DexScreener for MTM
       let entryPrice = result.price;
       const dsPrice = await this.tradeExecutor.getTokenPriceSol(tokenAddress);
       if (dsPrice > 0) entryPrice = dsPrice;
@@ -177,7 +223,7 @@ export class Orchestrator {
         token_address: tokenAddress,
         token_symbol: score.symbol,
         entry_price: entryPrice,
-        entry_sol: positionSol,
+        entry_sol: suggestedSol,
         entry_time: Date.now(),
         status: 'open',
         signal_wallets: JSON.stringify(signal.wallets),
@@ -194,7 +240,7 @@ export class Orchestrator {
       const trade = TradeDB.getAll().find((t) => t.id === tradeId);
       if (trade) this.positionManager.addPosition(trade, signal.wallets);
 
-      await this.notifier.notifyEntry(signal, score, positionSol, entryPrice, result.txHash);
+      await this.notifier.notifyEntry(signal, score, suggestedSol, entryPrice, result.txHash);
     } finally {
       this.processingTokens.delete(tokenAddress);
     }
@@ -202,20 +248,21 @@ export class Orchestrator {
 
   private async getStatus(): Promise<string> {
     const stats = TradeDB.stats();
-    const open = this.positionManager.getAll();
-    const sol = await this.tradeExecutor.getSOLBalance().catch(() => 0);
     return [
       '*TRENCH_AGENT STATUS*',
       '',
-      `SOL: ${sol.toFixed(3)}`,
-      `Open: ${open.length}`,
-      `Wallets: ${this.walletTracker.getTrackedCount()}`,
-      `Trades: ${stats.total} | WR ${stats.winRate}% | PnL ${stats.totalPnl} SOL`,
+      `Mode: ${PARAMS.MANUAL_MODE ? 'MANUAL (you buy)' : 'AUTO'}`,
+      `Wallets tracked: ${this.walletTracker.getTrackedCount()}`,
+      `Signals fired (this run): ${this.signalCount}`,
+      `DB trades logged: ${stats.total}`,
       `Dry run: ${PARAMS.DRY_RUN}`,
     ].join('\n');
   }
 
   private async getPositionsMessage(): Promise<string> {
+    if (PARAMS.MANUAL_MODE) {
+      return 'Manual mode — no auto positions. Buy yourself when you get a SIGNAL.';
+    }
     const positions = this.positionManager.getAll();
     if (!positions.length) return 'No open positions.';
     return positions

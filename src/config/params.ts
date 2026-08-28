@@ -5,6 +5,13 @@ import 'dotenv/config';
  * Philosophy: smart money = signal, CT = amplifier only.
  */
 export const PARAMS = {
+  /**
+   * MANUAL / SIGNAL ONLY (default true)
+   * true  = only Telegram/console alerts — you buy yourself
+   * false = may execute trades (still respects DRY_RUN)
+   */
+  MANUAL_MODE: process.env.MANUAL_MODE !== 'false',
+
   MIN_WALLETS_FOR_SIGNAL: 3,
   SIGNAL_WINDOW_SECONDS: 300,
 
@@ -34,6 +41,8 @@ export const PARAMS = {
   VOLUME_DROP_WINDOW_SEC: 900,
 
   ENABLE_CT_SCANNER: process.env.ENABLE_CT_SCANNER !== 'false',
+  /** Alert skipped tokens to Telegram (noisy) */
+  NOTIFY_SKIPS: process.env.NOTIFY_SKIPS === 'true',
   CT_LOOKBACK_MINUTES: 45,
   CT_MIN_MENTIONS_FOR_SIGNAL: 3,
   CT_VELOCITY_SPIKE_RATIO: 2.5,
@@ -49,11 +58,9 @@ export const PARAMS = {
 
 /**
  * Smart money wallets (public leaderboards: KOL Explorer / kolscan / Subglow).
- * Snapshot ~May–Aug 2026 — RE-VALIDATE on GMGN/Cielo before live size.
- * Prefer high trade count + positive realized PnL; avoid one-hit wonders.
+ * Snapshot ~May–Aug 2026 — RE-VALIDATE on GMGN/Cielo before relying on signals.
  */
 export const TRACKED_WALLETS: string[] = [
-  // --- Core KOLs (repeated top ranks) ---
   'CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o', // Cented
   'Bi4rd5FH5bYEN8scZ7wevxNZyNmKHdaBcvewdPFxYdLt', // Theo
   '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9', // Decu
@@ -64,8 +71,6 @@ export const TRACKED_WALLETS: string[] = [
   'G6fUXjMKPJzCY1rveAE6Qm7wy5U3vZgKDJmN1VPAdiZC', // Clukz
   'BCagckXeMChUKrHEd6fKFA1uiWDtcmCXMsqaheLiUPJd', // Dv
   '8rvAsDKeAcEjEkiZMug9k8v1y8mW6gQQiMobd89Uy7qR', // Casino
-
-  // --- Subglow / kolscan 30d leaders ---
   '78N177fzNJpp8pG49xDv1efYcTMSzo9tPTKEA9mAVkh2', // Sheep
   'Dgehc8YMv6dHsiPJVoumvq4pSBkMVvrTgTUg7wdcYJPJ', // omar
   '6S8GezkxYUfZy9JPtYnanbcZTMB87Wjt1qx3c6ELajKC', // Nyhrox
@@ -76,8 +81,6 @@ export const TRACKED_WALLETS: string[] = [
   '215nhcAHjQQGgwpQSJQ7zR26etbjjtVdW74NLzwEgQjP', // OGAntD
   'HYSq1KBAvqWpEv1pCbV31muKM1za5A1WSHGdiVLUoNhb', // Apex
   'DemfvB4iwd3NmVquvWqWbB92yVZWFFqybqBeJGdyEeM6', // japbitch
-
-  // --- More documented profitable ---
   '4fZFcK8ms3bFMpo1ACzEUz8bH741fQW4zhAMGd5yZMHu', // Rilsio
   '8nqtxpFpuXwfXG4pBLsDkkuMMPK9FjSkBMCn542HiM3v', // dov
   'DAEdBmTPEKM6xkwfzC3d411QUe6coKpkND6UURa4CvHC', // Fox
@@ -85,12 +88,9 @@ export const TRACKED_WALLETS: string[] = [
   'DjM7Tu7whh6P3pGVBfDzwXAx2zaw51GJWrJE3PwtuN7s', // LUKEY
   'GfXQesPe3Zuwg8JhAt6Cg8euJDTVx751enp9EQQmhzPH', // Spuno
   '5hAgYC8TJCcEZV7LTXAzkTrm7YL29YXyQQJPCNrG84zM', // Schoen
-
-  // --- Dune recent high-WR / PnL samples (re-check before relying) ---
   'HCsfJh2qfGtsoJ9hkhBLyF84YMLFWFUcnTcKEZNtiFsW',
   '4oLKsFMzB6ttQDsDgKeNKWB6V8uHAQ8vtNQLxbfKVWwA',
   '7uPxCfh1cygSo1sx1rsHyxjdxyyR9hbucsLDvbeN26Hf',
 ];
 
-/** Optional high-signal CT handles (no @) */
 export const CT_PRIORITY_ACCOUNTS: string[] = [];

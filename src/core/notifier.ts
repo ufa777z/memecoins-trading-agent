@@ -5,7 +5,7 @@ import type { Position } from '../agents/positionManager.js';
 import type { CTSignal } from '../agents/ctScanner.js';
 
 /**
- * Minimal Telegram alerts — style from PERSONALITY.md
+ * Telegram / console alerts — manual mode focuses on CA + links.
  */
 export class Notifier {
   private bot: TelegramBot | null = null;
@@ -30,15 +30,24 @@ export class Notifier {
     if (!this.bot) return;
     this.bot.onText(/\/status/, async (msg) => {
       if (String(msg.chat.id) !== this.chatId) return;
-      await this.bot!.sendMessage(this.chatId, await handlers.onStatus(), { parse_mode: 'Markdown' });
+      await this.bot!.sendMessage(this.chatId, await handlers.onStatus(), {
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+      });
     });
     this.bot.onText(/\/report/, async (msg) => {
       if (String(msg.chat.id) !== this.chatId) return;
-      await this.bot!.sendMessage(this.chatId, await handlers.onReport(), { parse_mode: 'Markdown' });
+      await this.bot!.sendMessage(this.chatId, await handlers.onReport(), {
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+      });
     });
     this.bot.onText(/\/positions/, async (msg) => {
       if (String(msg.chat.id) !== this.chatId) return;
-      await this.bot!.sendMessage(this.chatId, await handlers.onPositions(), { parse_mode: 'Markdown' });
+      await this.bot!.sendMessage(this.chatId, await handlers.onPositions(), {
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+      });
     });
   }
 
@@ -46,11 +55,56 @@ export class Notifier {
     console.log(text);
     if (this.bot && this.chatId) {
       try {
-        await this.bot.sendMessage(this.chatId, text, { parse_mode: 'Markdown' });
+        await this.bot.sendMessage(this.chatId, text, {
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true,
+        });
       } catch (err) {
         console.error('[Notifier]', (err as Error).message);
       }
     }
+  }
+
+  /** Primary alert for manual trading — coin only, no auto-buy */
+  async notifySignalOnly(
+    signal: ConvergenceSignal,
+    score: TokenScore,
+    finalScore: number,
+    suggestedSol: number,
+    ctScore: number
+  ): Promise<void> {
+    const ca = signal.tokenAddress;
+    const sym = score.symbol || 'UNKNOWN';
+    const shortWallets = signal.wallets
+      .map((w) => `${w.slice(0, 4)}…${w.slice(-4)}`)
+      .join(', ');
+
+    await this.send(
+      [
+        `👁 *SIGNAL (manual)* — $${sym}`,
+        '',
+        `CA: \`${ca}\``,
+        '',
+        `wallets: ${signal.walletCount} (${shortWallets})`,
+        `window: ~${Math.max(1, Math.round((signal.lastSeen - signal.firstSeen) / 1000))}s`,
+        `smart SOL seen: ${signal.totalSol.toFixed(2)}`,
+        '',
+        `score: *${finalScore.toFixed(0)}*/100  (base ${score.composite} + CT ${ctScore})`,
+        `vol ${score.volume} | hold ${score.holders} | dev ${score.dev} | dist ${score.distribution}`,
+        score.volumeUsd != null ? `24h vol ~$${Math.round(score.volumeUsd).toLocaleString()}` : '',
+        '',
+        `suggested size (if you trade): ~${suggestedSol} SOL`,
+        '',
+        `[GMGN](https://gmgn.ai/sol/token/${ca})`,
+        `[DexScreener](https://dexscreener.com/solana/${ca})`,
+        `[Birdeye](https://birdeye.so/token/${ca}?chain=solana)`,
+        `[Solscan](https://solscan.io/token/${ca})`,
+        '',
+        `_No auto-buy — copy CA and trade yourself_`,
+      ]
+        .filter(Boolean)
+        .join('\n')
+    );
   }
 
   async notifyEntry(
@@ -80,7 +134,7 @@ export class Notifier {
   async notifyExit(
     position: Position,
     percent: number,
-    solOut: number,
+    _solOut: number,
     message: string
   ): Promise<void> {
     await this.send(
@@ -98,7 +152,9 @@ export class Notifier {
   }
 
   async notifySkip(token: string, symbol: string, score: TokenScore, reason: string): Promise<void> {
-    await this.send(`⚫ SKIPPED: $${symbol || token.slice(0, 8)}\nreason: ${reason} | score ${score.composite}/100`);
+    await this.send(
+      `⚫ SKIPPED: $${symbol || token.slice(0, 8)}\nreason: ${reason} | score ${score.composite}/100`
+    );
   }
 
   async notifyCTMotion(position: Position, ct: CTSignal): Promise<void> {
